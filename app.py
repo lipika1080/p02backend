@@ -6,7 +6,7 @@ from bson.objectid import ObjectId
 import requests
 from database import get_db
 from utils.email import send_email
-from datetime import datetime
+from datetime import datetime, timedelta
 
 load_dotenv()
 
@@ -43,11 +43,46 @@ def book_appointment():
 
 @app.route("/appointments", methods=["GET"])
 def list_appointments():
+    date_str = request.args.get("date")
+    query = {}
+    if date_str:
+        try:
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            start = date_obj
+            end = date_obj + timedelta(days=1)
+            query["datetime"] = {"$gte": start.isoformat(), "$lt": end.isoformat()}
+        except ValueError:
+            return jsonify({"error": "Invalid date format, must be YYYY-MM-DD"}), 400
+
     appointments = []
-    for appt in db.appointments.find():
+    for appt in db.appointments.find(query):
         appt["_id"] = str(appt["_id"])
         appointments.append(appt)
     return jsonify(appointments), 200
+
+@app.route("/appointments/summary", methods=["GET"])
+def appointment_summary():
+    date_param = request.args.get("date")
+
+    total_appointments = db.appointments.count_documents({})
+
+    date_total = 0
+    if date_param:
+        try:
+            date_obj = datetime.strptime(date_param, "%Y-%m-%d")
+            start = date_obj.isoformat()
+            end = (date_obj + timedelta(days=1)).isoformat()
+            date_total = db.appointments.count_documents({
+                "datetime": {"$gte": start, "$lt": end}
+            })
+        except ValueError:
+            return jsonify({"error": "Invalid date format, must be YYYY-MM-DD"}), 400
+
+    return jsonify({
+        "total": total_appointments,
+        "dateTotal": date_total
+    }), 200
+
 
 @app.route("/appointments/<id>/invoice", methods=["POST"])
 def generate_invoice(id):
@@ -79,20 +114,18 @@ def generate_invoice(id):
             headers=headers,
             json=body
         )
-        response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        error_detail = {
+        return jsonify({
             "error": "Failed to generate invoice",
             "exception": str(e),
             "response_status": getattr(e.response, "status_code", None),
             "response_body": getattr(e.response, "text", None)
-        }
-        return jsonify(error_detail), 500
+        }), 500
 
     invoice = response.json()["choices"][0]["message"]["content"].strip()
     db.appointments.update_one({"_id": ObjectId(id)}, {"$set": {"invoice": invoice}})
     return jsonify({"invoice": invoice}), 200
-
 
 @app.route("/appointments/<id>/email-invoice", methods=["POST"])
 def email_invoice(id):
